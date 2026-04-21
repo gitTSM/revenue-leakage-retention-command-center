@@ -41,3 +41,28 @@ FROM generate_series(
 
 -- Optional validation
 SELECT COUNT(*) AS total_rows FROM dim_date;
+
+-- ============================================================
+-- Step 2: Populate dim_region
+-- ============================================================
+
+DELETE FROM dim_region;
+
+INSERT INTO dim_region (
+    region_name,
+    country,
+    market_segment
+)
+VALUES
+    ('North America', 'United States', 'Enterprise'),
+    ('North America', 'United States', 'Mid-Market'),
+    ('Europe', 'United Kingdom', 'Enterprise'),
+    ('Europe', 'Germany', 'Mid-Market'),
+    ('APAC', 'Australia', 'Enterprise'),
+    ('APAC', 'Singapore', 'Mid-Market'),
+    ('Latin America', 'Brazil', 'Mid-Market');
+
+-- Optional validation
+SELECT *
+FROM dim_region
+ORDER BY region_id;

@@ -542,3 +542,217 @@ SELECT *
 FROM fact_payments
 ORDER BY payment_id;
 
+-- ============================================================
+-- Step 10: Populate fact_usage
+-- ============================================================
+
+DELETE FROM analytics.fact_usage;
+
+INSERT INTO analytics.fact_usage (
+    customer_id,
+    product_id,
+    date_id,
+    usage_date,
+    active_users,
+    login_count,
+    feature_adoption_rate,
+    utilization_score
+)
+SELECT
+    frm.customer_id,
+    frm.product_id,
+    frm.date_id,
+    dd.full_date,
+
+    -- Active users (varies across time)
+    GREATEST(
+        1,
+        (10 + (frm.customer_id % 30)) + (EXTRACT(MONTH FROM dd.full_date)::INT % 6)
+    ),
+
+    -- Login count (time-varying)
+    GREATEST(
+        1,
+        ((10 + (frm.customer_id % 30)) + (EXTRACT(MONTH FROM dd.full_date)::INT % 6))
+        * (4 + (frm.product_id % 5))
+    ),
+
+    -- Feature adoption
+    ROUND(
+        LEAST(100,
+            40 + dc.health_score * 0.5
+        )::NUMERIC,
+        2
+    ),
+
+    -- Utilization
+    ROUND(
+        LEAST(100,
+            35 + dc.health_score * 0.55
+        )::NUMERIC,
+        2
+    )
+
+FROM analytics.fact_revenue_monthly frm
+JOIN analytics.dim_customer dc
+    ON frm.customer_id = dc.customer_id
+JOIN analytics.dim_date dd
+    ON frm.date_id = dd.date_id;
+
+-- Validation
+SELECT *
+FROM analytics.fact_usage
+ORDER BY usage_id
+LIMIT 20;
+
+-- ============================================================
+-- Step 11: Populate fact_tickets
+-- ============================================================
+
+DELETE FROM analytics.fact_tickets;
+
+INSERT INTO analytics.fact_tickets (
+    customer_id,
+    date_id,
+    ticket_created_date,
+    ticket_closed_date,
+    ticket_priority,
+    ticket_status,
+    issue_category,
+    resolution_time_hours,
+    escalation_flag,
+    satisfaction_score
+)
+SELECT
+    dc.customer_id,
+    dd.date_id,
+    dd.full_date AS ticket_created_date,
+
+    CASE
+        WHEN (dc.customer_id % 4) = 0 THEN dd.full_date + ((dc.customer_id % 5) + 1)
+        ELSE NULL
+    END AS ticket_closed_date,
+
+    CASE
+        WHEN dc.customer_id % 10 = 0 THEN 'Critical'
+        WHEN dc.customer_id % 7 = 0 THEN 'High'
+        WHEN dc.customer_id % 3 = 0 THEN 'Medium'
+        ELSE 'Low'
+    END AS ticket_priority,
+
+    CASE
+        WHEN (dc.customer_id % 4) = 0 THEN 'Closed'
+        WHEN (dc.customer_id % 3) = 0 THEN 'Resolved'
+        WHEN (dc.customer_id % 5) = 0 THEN 'In Progress'
+        ELSE 'Open'
+    END AS ticket_status,
+
+    CASE
+        WHEN dc.customer_id % 5 = 0 THEN 'Billing Issue'
+        WHEN dc.customer_id % 4 = 0 THEN 'Product Bug'
+        WHEN dc.customer_id % 3 = 0 THEN 'Integration Issue'
+        ELSE 'General Inquiry'
+    END AS issue_category,
+
+    CASE
+        WHEN (dc.customer_id % 4) = 0 THEN ROUND((dc.customer_id % 24 + 1)::NUMERIC, 2)
+        ELSE NULL
+    END AS resolution_time_hours,
+
+    CASE
+        WHEN dc.customer_id % 8 = 0 THEN TRUE
+        ELSE FALSE
+    END AS escalation_flag,
+
+    ROUND(
+        CASE
+            WHEN dc.status = 'Churned' THEN 4 + (dc.customer_id % 3)
+            WHEN dc.status = 'At Risk' THEN 5 + (dc.customer_id % 3)
+            WHEN dc.status = 'Inactive' THEN 6 + (dc.customer_id % 3)
+            ELSE 7 + (dc.customer_id % 3)
+        END
+    , 2) AS satisfaction_score
+
+FROM analytics.dim_customer dc
+JOIN analytics.dim_date dd
+    ON dd.full_date BETWEEN DATE '2022-01-01' AND DATE '2023-12-31'
+WHERE (dc.customer_id + dd.date_id) % 20 = 0;
+
+-- Validation
+SELECT *
+FROM analytics.fact_tickets
+ORDER BY ticket_id
+LIMIT 25;
+
+-- ============================================================
+-- Step 12: Populate fact_renewals
+-- ============================================================
+
+DELETE FROM analytics.fact_renewals;
+
+WITH contract_pairs AS (
+    SELECT
+        fc.contract_id AS previous_contract_id,
+        fc.customer_id,
+        fc.contract_end_date,
+        fc.net_contract_value AS previous_value,
+        LEAD(fc.contract_id) OVER (
+            PARTITION BY fc.customer_id
+            ORDER BY fc.contract_start_date
+        ) AS renewed_contract_id,
+        LEAD(fc.net_contract_value) OVER (
+            PARTITION BY fc.customer_id
+            ORDER BY fc.contract_start_date
+        ) AS renewed_value
+    FROM analytics.fact_contracts fc
+),
+renewal_base AS (
+    SELECT
+        previous_contract_id,
+        renewed_contract_id,
+        customer_id,
+        contract_end_date AS renewal_date,
+        previous_value,
+        renewed_value
+    FROM contract_pairs
+)
+INSERT INTO analytics.fact_renewals (
+    previous_contract_id,
+    renewed_contract_id,
+    customer_id,
+    renewal_date,
+    renewal_status,
+    renewal_amount,
+    previous_contract_value,
+    renewed_contract_value,
+    renewal_term_months
+)
+SELECT
+    rb.previous_contract_id,
+    rb.renewed_contract_id,
+    rb.customer_id,
+    rb.renewal_date,
+
+    CASE
+        WHEN rb.renewed_contract_id IS NULL THEN 'Churned'
+        WHEN rb.renewed_value > rb.previous_value * 1.1 THEN 'Upsold'
+        WHEN rb.renewed_value < rb.previous_value * 0.9 THEN 'Downgraded'
+        ELSE 'Renewed'
+    END AS renewal_status,
+
+    COALESCE(rb.renewed_value, 0) AS renewal_amount,
+    rb.previous_value AS previous_contract_value,
+    rb.renewed_value AS renewed_contract_value,
+
+    CASE
+        WHEN rb.renewed_contract_id IS NULL THEN NULL
+        ELSE 12 + (rb.customer_id % 12)
+    END AS renewal_term_months
+
+FROM renewal_base rb;
+
+-- Validation
+SELECT *
+FROM analytics.fact_renewals
+ORDER BY renewal_id
+LIMIT 25;

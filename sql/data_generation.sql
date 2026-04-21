@@ -67,4 +67,29 @@ SELECT *
 FROM dim_region
 ORDER BY region_id;
 
+-- ============================================================
+-- Step 3: Populate dim_product
+-- ============================================================
 
+DELETE FROM dim_product;
+
+INSERT INTO dim_product (
+    product_name,
+    product_category,
+    pricing_model,
+    list_price,
+    active_flag
+)
+VALUES
+    ('Core Analytics Platform', 'Platform', 'Subscription', 12000.00, TRUE),
+    ('Advanced Reporting Suite', 'Analytics Add-On', 'Subscription', 6000.00, TRUE),
+    ('AI Forecasting Module', 'AI Add-On', 'Subscription', 9000.00, TRUE),
+    ('Data Integration Package', 'Services', 'Annual License', 15000.00, TRUE),
+    ('Executive Dashboard Pack', 'Analytics Add-On', 'Subscription', 4500.00, TRUE),
+    ('Customer Health Monitor', 'Retention Add-On', 'Subscription', 7000.00, TRUE),
+    ('Usage Intelligence Engine', 'Product Intelligence', 'Subscription', 8000.00, TRUE);
+
+-- Validation
+SELECT *
+FROM dim_product
+ORDER BY product_id;

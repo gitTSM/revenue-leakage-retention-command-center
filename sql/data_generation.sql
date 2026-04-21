@@ -317,3 +317,228 @@ CROSS JOIN LATERAL (
 SELECT *
 FROM fact_contracts
 ORDER BY contract_id;
+
+-- ============================================================
+-- Step 7: Populate fact_revenue_monthly
+-- ============================================================
+
+DELETE FROM fact_revenue_monthly;
+
+WITH contract_months AS (
+    SELECT
+        fc.contract_id,
+        fc.customer_id,
+        fc.product_id,
+        fc.account_manager_id,
+        fc.contract_start_date,
+        fc.contract_end_date,
+        fc.net_contract_value,
+        fc.contract_status,
+        generate_series(
+            DATE_TRUNC('month', fc.contract_start_date)::DATE,
+            DATE_TRUNC('month', fc.contract_end_date)::DATE,
+            INTERVAL '1 month'
+        )::DATE AS revenue_month
+    FROM fact_contracts fc
+),
+contract_metrics AS (
+    SELECT
+        cm.contract_id,
+        cm.customer_id,
+        cm.product_id,
+        cm.account_manager_id,
+        cm.revenue_month,
+        cm.contract_status,
+        ROUND(
+            cm.net_contract_value
+            / NULLIF(
+                (
+                    (EXTRACT(YEAR FROM AGE(cm.contract_end_date, cm.contract_start_date)) * 12)
+                    + EXTRACT(MONTH FROM AGE(cm.contract_end_date, cm.contract_start_date))
+                    + 1
+                ),
+                0
+            ),
+            2
+        ) AS monthly_revenue
+    FROM contract_months cm
+)
+INSERT INTO fact_revenue_monthly (
+    customer_id,
+    product_id,
+    account_manager_id,
+    date_id,
+    contract_id,
+    recognized_revenue,
+    expansion_revenue,
+    contraction_revenue,
+    churned_revenue,
+    leakage_amount
+)
+SELECT
+    m.customer_id,
+    m.product_id,
+    m.account_manager_id,
+    dd.date_id,
+    m.contract_id,
+    CASE
+        WHEN m.contract_status IN ('Cancelled', 'Expired') AND EXTRACT(MONTH FROM m.revenue_month) % 5 = 0 THEN 0
+        ELSE m.monthly_revenue
+    END AS recognized_revenue,
+    CASE
+        WHEN m.customer_id % 11 = 0 AND EXTRACT(MONTH FROM m.revenue_month) IN (3, 6, 9, 12)
+            THEN ROUND(m.monthly_revenue * 0.18, 2)
+        ELSE 0
+    END AS expansion_revenue,
+    CASE
+        WHEN m.customer_id % 9 = 0 AND EXTRACT(MONTH FROM m.revenue_month) IN (4, 8, 12)
+            THEN ROUND(m.monthly_revenue * 0.12, 2)
+        ELSE 0
+    END AS contraction_revenue,
+    CASE
+        WHEN m.contract_status = 'Cancelled' AND m.revenue_month >= DATE_TRUNC('month', CURRENT_DATE)::DATE - INTERVAL '12 months'
+            THEN ROUND(m.monthly_revenue, 2)
+        ELSE 0
+    END AS churned_revenue,
+    CASE
+        WHEN m.customer_id % 10 = 0
+            THEN ROUND(m.monthly_revenue * 0.08, 2)
+        WHEN m.customer_id % 6 = 0
+            THEN ROUND(m.monthly_revenue * 0.04, 2)
+        ELSE 0
+    END AS leakage_amount
+FROM contract_metrics m
+JOIN dim_date dd
+    ON dd.full_date = m.revenue_month
+ORDER BY m.contract_id, m.revenue_month;
+
+-- Validation
+SELECT *
+FROM fact_revenue_monthly
+ORDER BY revenue_monthly_id;
+
+-- ============================================================
+-- Step 8: Populate fact_invoices
+-- ============================================================
+
+DELETE FROM fact_invoices;
+
+WITH billing_schedule AS (
+    SELECT
+        fc.contract_id,
+        fc.customer_id,
+        fc.contract_start_date,
+        fc.contract_end_date,
+        fc.billing_frequency,
+        fc.discount_percent,
+        fc.net_contract_value,
+        generate_series(
+            DATE_TRUNC('month', fc.contract_start_date)::DATE,
+            DATE_TRUNC('month', fc.contract_end_date)::DATE,
+            CASE
+                WHEN fc.billing_frequency = 'Monthly' THEN INTERVAL '1 month'
+                WHEN fc.billing_frequency = 'Quarterly' THEN INTERVAL '3 months'
+                ELSE INTERVAL '12 months'
+            END
+        )::DATE AS invoice_date
+    FROM fact_contracts fc
+),
+invoice_base AS (
+    SELECT
+        bs.contract_id,
+        bs.customer_id,
+        bs.invoice_date,
+        (bs.invoice_date + INTERVAL '30 days')::DATE AS due_date,
+        bs.discount_percent,
+        CASE
+            WHEN bs.billing_frequency = 'Monthly' THEN ROUND(bs.net_contract_value / 12.0, 2)
+            WHEN bs.billing_frequency = 'Quarterly' THEN ROUND(bs.net_contract_value / 4.0, 2)
+            ELSE ROUND(bs.net_contract_value, 2)
+        END AS invoice_amount
+    FROM billing_schedule bs
+)
+INSERT INTO fact_invoices (
+    contract_id,
+    customer_id,
+    date_id,
+    invoice_date,
+    due_date,
+    invoice_amount,
+    billed_discount_amount,
+    invoice_status
+)
+SELECT
+    ib.contract_id,
+    ib.customer_id,
+    dd.date_id,
+    ib.invoice_date,
+    ib.due_date,
+    ib.invoice_amount,
+    ROUND(ib.invoice_amount * (ib.discount_percent / 100.0), 2) AS billed_discount_amount,
+    CASE
+        WHEN ib.customer_id % 13 = 0 THEN 'Overdue'
+        WHEN ib.customer_id % 11 = 0 THEN 'Open'
+        WHEN ib.customer_id % 29 = 0 THEN 'Cancelled'
+        ELSE 'Paid'
+    END AS invoice_status
+FROM invoice_base ib
+JOIN dim_date dd
+    ON dd.full_date = ib.invoice_date
+ORDER BY ib.contract_id, ib.invoice_date;
+
+-- Validation
+SELECT *
+FROM fact_invoices
+ORDER BY invoice_id;
+
+-- ============================================================
+-- Step 9: Populate fact_payments
+-- ============================================================
+
+DELETE FROM fact_payments;
+
+INSERT INTO fact_payments (
+    invoice_id,
+    customer_id,
+    payment_date,
+    payment_amount,
+    payment_status,
+    days_to_pay
+)
+SELECT
+    fi.invoice_id,
+    fi.customer_id,
+    CASE
+        WHEN fi.invoice_status = 'Paid' THEN fi.invoice_date + ((fi.customer_id % 25) + 5)
+        WHEN fi.invoice_status = 'Overdue' THEN fi.due_date + ((fi.customer_id % 20) + 10)
+        WHEN fi.invoice_status = 'Open' THEN NULL
+        WHEN fi.invoice_status = 'Cancelled' THEN NULL
+        ELSE NULL
+    END AS payment_date,
+    CASE
+        WHEN fi.invoice_status = 'Paid' THEN fi.invoice_amount
+        WHEN fi.invoice_status = 'Overdue' THEN ROUND(fi.invoice_amount * 0.65, 2)
+        WHEN fi.invoice_status = 'Open' THEN 0.00
+        WHEN fi.invoice_status = 'Cancelled' THEN 0.00
+        ELSE 0.00
+    END AS payment_amount,
+    CASE
+        WHEN fi.invoice_status = 'Paid' THEN 'Paid'
+        WHEN fi.invoice_status = 'Overdue' THEN 'Partial'
+        WHEN fi.invoice_status = 'Open' THEN 'Pending'
+        WHEN fi.invoice_status = 'Cancelled' THEN 'Failed'
+        ELSE 'Pending'
+    END AS payment_status,
+    CASE
+        WHEN fi.invoice_status = 'Paid' THEN ((fi.customer_id % 25) + 5)
+        WHEN fi.invoice_status = 'Overdue' THEN ((fi.due_date + ((fi.customer_id % 20) + 10)) - fi.invoice_date)
+        ELSE NULL
+    END AS days_to_pay
+FROM fact_invoices fi
+ORDER BY fi.invoice_id;
+
+-- Validation
+SELECT *
+FROM fact_payments
+ORDER BY payment_id;
+

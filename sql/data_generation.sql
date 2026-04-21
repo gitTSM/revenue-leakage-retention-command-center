@@ -93,3 +93,227 @@ VALUES
 SELECT *
 FROM dim_product
 ORDER BY product_id;
+
+-- ============================================================
+-- Step 4: Populate dim_account_manager
+-- ============================================================
+
+DELETE FROM dim_account_manager;
+
+WITH regions AS (
+    SELECT region_id,
+           ROW_NUMBER() OVER (ORDER BY region_id) AS rn
+    FROM dim_region
+)
+INSERT INTO dim_account_manager (
+    manager_name,
+    manager_email,
+    team_name,
+    region_id,
+    hire_date,
+    active_flag
+)
+SELECT
+    'Manager ' || gs AS manager_name,
+    'manager' || gs || '@company.com' AS manager_email,
+    CASE 
+        WHEN gs % 3 = 0 THEN 'Enterprise Team'
+        WHEN gs % 3 = 1 THEN 'Mid-Market Team'
+        ELSE 'Expansion Team'
+    END AS team_name,
+    r.region_id,
+    DATE '2018-01-01' + (gs * 30) AS hire_date,
+    TRUE
+FROM generate_series(1, 20) AS gs
+JOIN regions r
+    ON r.rn = ((gs - 1) % (SELECT COUNT(*) FROM regions)) + 1;
+
+-- Validation
+SELECT *
+FROM dim_account_manager
+ORDER BY account_manager_id;
+
+-- ============================================================
+-- Step 5: Populate dim_customer
+-- ============================================================
+
+DELETE FROM dim_customer;
+
+WITH managers AS (
+    SELECT
+        account_manager_id,
+        region_id,
+        ROW_NUMBER() OVER (ORDER BY account_manager_id) AS rn,
+        COUNT(*) OVER () AS total_managers
+    FROM dim_account_manager
+)
+INSERT INTO dim_customer (
+    customer_name,
+    customer_segment,
+    industry,
+    employee_count,
+    annual_revenue_band,
+    region_id,
+    account_manager_id,
+    signup_date,
+    status,
+    health_score
+)
+SELECT
+    'Customer ' || gs AS customer_name,
+    CASE
+        WHEN gs % 3 = 0 THEN 'Enterprise'
+        WHEN gs % 3 = 1 THEN 'Mid-Market'
+        ELSE 'SMB'
+    END AS customer_segment,
+    CASE
+        WHEN gs % 5 = 0 THEN 'Financial Services'
+        WHEN gs % 5 = 1 THEN 'Healthcare'
+        WHEN gs % 5 = 2 THEN 'Technology'
+        WHEN gs % 5 = 3 THEN 'Retail'
+        ELSE 'Manufacturing'
+    END AS industry,
+    (50 + (gs * 17) % 5000) AS employee_count,
+    CASE
+        WHEN gs % 4 = 0 THEN '$1M-$10M'
+        WHEN gs % 4 = 1 THEN '$10M-$50M'
+        WHEN gs % 4 = 2 THEN '$50M-$250M'
+        ELSE '$250M+'
+    END AS annual_revenue_band,
+    m.region_id,
+    m.account_manager_id,
+    DATE '2021-01-01' + ((gs * 11) % 1460) AS signup_date,
+    CASE
+        WHEN gs % 12 = 0 THEN 'At Risk'
+        WHEN gs % 20 = 0 THEN 'Churned'
+        WHEN gs % 15 = 0 THEN 'Inactive'
+        ELSE 'Active'
+    END AS status,
+    ROUND(
+        CASE
+            WHEN gs % 20 = 0 THEN 35 + ((gs * 3) % 20)
+            WHEN gs % 12 = 0 THEN 45 + ((gs * 5) % 20)
+            WHEN gs % 15 = 0 THEN 40 + ((gs * 4) % 15)
+            ELSE 70 + ((gs * 7) % 31)
+        END
+    , 2) AS health_score
+FROM generate_series(1, 200) AS gs
+JOIN managers m
+    ON m.rn = ((gs - 1) % m.total_managers) + 1;
+
+-- Validation
+SELECT *
+FROM dim_customer
+ORDER BY customer_id;
+
+-- ============================================================
+-- Step 6: Populate fact_contracts
+-- ============================================================
+
+DELETE FROM fact_contracts;
+
+WITH customer_base AS (
+    SELECT
+        c.customer_id,
+        c.account_manager_id,
+        c.signup_date,
+        ROW_NUMBER() OVER (ORDER BY c.customer_id) AS rn,
+        COUNT(*) OVER () AS total_customers
+    FROM dim_customer c
+),
+product_base AS (
+    SELECT
+        p.product_id,
+        p.list_price,
+        ROW_NUMBER() OVER (ORDER BY p.product_id) AS rn,
+        COUNT(*) OVER () AS total_products
+    FROM dim_product p
+)
+INSERT INTO fact_contracts (
+    customer_id,
+    product_id,
+    account_manager_id,
+    contract_start_date,
+    contract_end_date,
+    contract_term_months,
+    contract_value,
+    discount_percent,
+    net_contract_value,
+    billing_frequency,
+    auto_renew_flag,
+    contract_status,
+    created_at
+)
+SELECT
+    c.customer_id,
+    p.product_id,
+    c.account_manager_id,
+    contract_start_date,
+    (contract_start_date + (c.term_months || ' months')::INTERVAL)::DATE,
+    c.term_months,
+    contract_value,
+    c.discount_percent,
+    ROUND(contract_value * (1 - c.discount_percent / 100.0), 2) AS net_contract_value,
+    c.billing_frequency,
+    c.auto_renew_flag,
+    c.contract_status,
+    contract_start_date::TIMESTAMP + INTERVAL '9 hours'
+FROM (
+    SELECT
+        cb.customer_id,
+        cb.account_manager_id,
+        cb.signup_date,
+        ((cb.rn - 1) % 7) + 1 AS product_rn,
+        (DATE_TRUNC('month', cb.signup_date)::DATE + (((cb.rn * 13) % 90)::INT))::DATE AS contract_start_date,
+        CASE
+            WHEN cb.rn % 5 = 0 THEN 24
+            WHEN cb.rn % 3 = 0 THEN 6
+            ELSE 12
+        END AS term_months,
+        CASE
+            WHEN cb.rn % 4 = 0 THEN 'Annual'
+            WHEN cb.rn % 4 = 1 THEN 'Quarterly'
+            ELSE 'Monthly'
+        END AS billing_frequency,
+        CASE
+            WHEN cb.rn % 2 = 0 THEN TRUE
+            ELSE FALSE
+        END AS auto_renew_flag,
+        CASE
+            WHEN cb.rn % 20 = 0 THEN 'Cancelled'
+            WHEN cb.rn % 9 = 0 THEN 'Expired'
+            WHEN cb.rn % 7 = 0 THEN 'Pending Renewal'
+            ELSE 'Active'
+        END AS contract_status,
+        CASE
+            WHEN cb.rn % 10 = 0 THEN 20.00
+            WHEN cb.rn % 6 = 0 THEN 12.50
+            WHEN cb.rn % 4 = 0 THEN 7.50
+            ELSE 0.00
+        END AS discount_percent
+    FROM customer_base cb
+) c
+JOIN product_base p
+    ON p.rn = c.product_rn
+CROSS JOIN LATERAL (
+    SELECT ROUND(
+        p.list_price *
+        CASE
+            WHEN c.term_months = 24 THEN 2.00
+            WHEN c.term_months = 12 THEN 1.00
+            ELSE 0.60
+        END *
+        CASE
+            WHEN c.customer_id % 5 = 0 THEN 1.35
+            WHEN c.customer_id % 5 = 1 THEN 1.15
+            WHEN c.customer_id % 5 = 2 THEN 1.00
+            WHEN c.customer_id % 5 = 3 THEN 0.85
+            ELSE 0.70
+        END
+    , 2) AS contract_value
+) cv;
+
+-- Validation
+SELECT *
+FROM fact_contracts
+ORDER BY contract_id;

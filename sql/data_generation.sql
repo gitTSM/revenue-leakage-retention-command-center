@@ -54,15 +54,17 @@ INSERT INTO dim_region (
     market_segment
 )
 VALUES
-    ('North America', 'United States', 'Enterprise'),
-    ('North America', 'United States', 'Mid-Market'),
-    ('Europe', 'United Kingdom', 'Enterprise'),
-    ('Europe', 'Germany', 'Mid-Market'),
-    ('APAC', 'Australia', 'Enterprise'),
-    ('APAC', 'Singapore', 'Mid-Market'),
-    ('Latin America', 'Brazil', 'Mid-Market');
+    ('North America - Enterprise', 'United States', 'Enterprise'),
+    ('North America - Mid-Market', 'United States', 'Mid-Market'),
+    ('Europe - Enterprise', 'United Kingdom', 'Enterprise'),
+    ('Europe - Mid-Market', 'Germany', 'Mid-Market'),
+    ('APAC - Enterprise', 'Australia', 'Enterprise'),
+    ('APAC - Mid-Market', 'Singapore', 'Mid-Market'),
+    ('Latin America - Mid-Market', 'Brazil', 'Mid-Market');
 
--- Optional validation
+-- Validation
 SELECT *
 FROM dim_region
 ORDER BY region_id;
+
+
